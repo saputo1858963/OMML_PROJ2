@@ -8,18 +8,21 @@ from scipy.optimize import minimize
 
 def extract_data():
     """
-    Load and prepare FashionMNIST folder containing the training and testing data.
+    Load and prepare FashionMNIST folder using absolute paths for robustness.
     """
-    train_path = os.path.join('..', 'FashionMNIST', 'fashion-mnist_train.csv')
-    test_path = os.path.join('..', 'FashionMNIST', 'fashion-mnist_test.csv')
+    # Robust path finding
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(current_dir)
+    train_path = os.path.join(project_root, 'FashionMNIST', 'fashion-mnist_train.csv')
+    test_path = os.path.join(project_root, 'FashionMNIST', 'fashion-mnist_test.csv')
 
     if not os.path.exists(train_path):
-        train_path = os.path.join('FashionMNIST', 'fashion-mnist_train.csv')
-        test_path = os.path.join('FashionMNIST', 'fashion-mnist_test.csv')
+        raise FileNotFoundError(f"Data not found at {train_path}. Check your folder structure.")
 
     train = pd.read_csv(train_path)
     test = pd.read_csv(test_path)
 
+    # Filter for labels 2 (Pullover) and 3 (Dress)
     indexes = [2, 3]
     train_set = train[train['label'].isin(indexes)]
     test_set = test[test['label'].isin(indexes)]
@@ -29,12 +32,13 @@ def extract_data():
     X_Test = test_set.values[:, 1:]
     Y_Test = test_set.values[:, 0]
 
-    # Subset 1000 for training, 200 for testing
+    # Subset: 1000 for training, 200 for testing
     ind_2 = np.where(Y == 2)[0][:1000]
     ind_3 = np.where(Y == 3)[0][:1000]
     ind_2_test = np.where(Y_Test == 2)[0][:200]
     ind_3_test = np.where(Y_Test == 3)[0][:200]
 
+    # Map labels: 2 -> +1, 3 -> -1
     X2 = X[ind_2]; Y2 = np.ones(len(ind_2))
     X3 = X[ind_3]; Y3 = -np.ones(len(ind_3))
     
@@ -46,18 +50,22 @@ def extract_data():
     X_test = np.concatenate((X2t, X3t))
     Y_test = np.concatenate((Y2t, Y3t))
 
+    # Shuffle
     np.random.seed(1)
     perm = np.random.permutation(len(Y_train))
     X_train = X_train[perm]
     Y_train = Y_train[perm]
 
-    # Scale data
+    # Scale to [0, 1]
     X_train = X_train / 255.0
     X_test = X_test / 255.0
 
     return X_train, Y_train, X_test, Y_test
 
 def rbf_kernel(X1, X2, gamma):
+    """
+    Computes RBF kernel matrix.
+    """
     sq_norm1 = np.sum(X1**2, axis=1).reshape(-1, 1)
     sq_norm2 = np.sum(X2**2, axis=1).reshape(1, -1)
     dot_product = np.dot(X1, X2.T)
@@ -65,193 +73,156 @@ def rbf_kernel(X1, X2, gamma):
     return np.exp(-gamma * dist_sq)
 
 def predict(X_train, y_train, alpha, b, X_new, gamma):
+    """
+    Computes predictions on new data.
+    """
     K_new = rbf_kernel(X_train, X_new, gamma)
     decision = np.dot(alpha * y_train, K_new) + b
     return np.sign(decision)
 
 def compute_metrics(y_true, y_pred):
+    """
+    Computes accuracy and confusion matrix.
+    """
     accuracy = np.mean(y_true == y_pred) * 100
+    
+    # Map +1 -> 0, -1 -> 1 for matrix indexing
     y_t = np.where(y_true == 1, 0, 1)
     y_p = np.where(y_pred == 1, 0, 1)
+    
     cm = np.zeros((2, 2), dtype=int)
     for i in range(len(y_true)):
         cm[y_t[i], y_p[i]] += 1
+        
     return accuracy, cm
 
-def get_kkt_violation_indices(alpha, grad, y, C):
+def get_working_set_indices(alpha, grad, y, C, q):
     """
-    Identify indices that violate KKT conditions using Keerthi/Gilbert definition.
-    
-    I_up:  Indices where we can move in direction +y_i (Increase F)
-           {i | y_i = +1, alpha_i < C}  U  {i | y_i = -1, alpha_i > 0}
-           
-    I_low: Indices where we can move in direction -y_i (Decrease F)
-           {i | y_i = +1, alpha_i > 0}  U  {i | y_i = -1, alpha_i < C}
+    Selects q indices based on KKT violations (Keerthi/Gilbert).
+    CORRECTED LOGIC: Picks q/2 indices from I_up with SMALLEST y*grad
+                     and q/2 indices from I_low with LARGEST y*grad.
     """
-    
-    # y_i * grad_i is the optimality condition metric
+    # yg = y_i * grad_i
     yg = y * grad
     
-    # Create masks for the sets
-    # Set I_up
-    mask_up_1 = (y == 1) & (alpha < C - 1e-6)
-    mask_up_2 = (y == -1) & (alpha > 1e-6)
-    I_up = np.where(mask_up_1 | mask_up_2)[0]
+    # I_up: Indices where alpha can increase (y=+1 & a<C) OR (y=-1 & a>0)
+    I_up = np.where(((y == 1) & (alpha < C - 1e-6)) | 
+                    ((y == -1) & (alpha > 1e-6)))[0]
     
-    # Set I_low
-    mask_low_1 = (y == 1) & (alpha > 1e-6)
-    mask_low_2 = (y == -1) & (alpha < C - 1e-6)
-    I_low = np.where(mask_low_1 | mask_low_2)[0]
-    
-    return I_up, I_low, yg
+    # I_low: Indices where alpha can decrease (y=+1 & a>0) OR (y=-1 & a<C)
+    I_low = np.where(((y == 1) & (alpha > 1e-6)) | 
+                     ((y == -1) & (alpha < C - 1e-6)))[0]
 
-def solve_subproblem(Q_sub, y_sub, linear_term_sub, C, current_alpha_sub):
-    """
-    Solves the small quadratic problem for the working set.
-    """
-    def sub_obj(alpha_q):
-        # 0.5 * a' Q a + linear * a
-        return 0.5 * np.dot(alpha_q, np.dot(Q_sub, alpha_q)) + np.dot(linear_term_sub, alpha_q)
-    
-    def sub_jac(alpha_q):
-        return np.dot(Q_sub, alpha_q) + linear_term_sub
+    if len(I_up) == 0 or len(I_low) == 0:
+        return np.array([]), 0.0
 
-    # Equality constraint: sum(y_i * alpha_i) = - sum(y_fixed * alpha_fixed) = constant
-    # The solver handles "constant" automatically if we enforce dot(alpha, y) = current_val
-    target_sum = np.dot(current_alpha_sub, y_sub)
+    # --- FIX: SWAPPED SORTING ORDER ---
+    # We want min(yg) from I_up
+    I_up_sorted = I_up[np.argsort(yg[I_up])] # Ascending (Smallest first)
     
-    constraints = {'type': 'eq', 'fun': lambda a: np.dot(a, y_sub) - target_sum, 'jac': lambda a: y_sub}
-    bounds = [(0, C) for _ in range(len(y_sub))]
+    # We want max(yg) from I_low
+    I_low_sorted = I_low[np.argsort(yg[I_low])[::-1]] # Descending (Largest first)
+
+    # Calculate current Gap: max(I_low) - min(I_up)
+    # Ideally should be positive if violation exists
+    max_viol = yg[I_low_sorted[0]]
+    min_viol = yg[I_up_sorted[0]]
+    gap = max_viol - min_viol
+
+    # Select q/2 from each
+    n_select = q // 2
+    ws_indices = np.concatenate([I_up_sorted[:n_select], I_low_sorted[:n_select]])
     
-    res = minimize(sub_obj, current_alpha_sub, method='SLSQP', jac=sub_jac, 
-                   bounds=bounds, constraints=constraints, options={'ftol': 1e-8, 'disp': False})
+    return np.unique(ws_indices), gap
+
+def solve_subproblem(Q_sub, y_sub, linear_term, C, alpha_init):
+    """
+    Solves the small QP for the working set using SLSQP.
+    """
+    def sub_obj(a):
+        return 0.5 * np.dot(a, np.dot(Q_sub, a)) + np.dot(linear_term, a)
+
+    def sub_jac(a):
+        return np.dot(Q_sub, a) + linear_term
+
+    # Constraint: sum(y_i * alpha_i) = constant
+    current_eq_val = np.dot(alpha_init, y_sub)
+    constraints = {'type': 'eq', 
+                   'fun': lambda a: np.dot(a, y_sub) - current_eq_val, 
+                   'jac': lambda a: y_sub}
+    
+    bounds = [(0, C) for _ in range(len(alpha_init))]
+    
+    res = minimize(sub_obj, alpha_init, jac=sub_jac, method='SLSQP', 
+                   bounds=bounds, constraints=constraints, 
+                   options={'ftol': 1e-8, 'disp': False})
     return res.x
 
-def solve_svm_decomposition(X, y, C, gamma, q=4, max_outer_iter=2000, tol=1e-3):
+def solve_decomposition(X, y, C, gamma, q=4, max_iter=2000, tol=1e-3):
     """
-    Decomposition method for Dual SVM.
-    q: size of working set (must be even, >= 4)
+    Main Decomposition Solver.
     """
     n_samples = X.shape[0]
-    
-    # 1. Initialization
     alpha = np.zeros(n_samples)
     
-    print(" -> Precomputing Kernel Matrix (this happens once)...")
+    print(" -> Precomputing Kernel Matrix (this might take a moment)...")
     K = rbf_kernel(X, X, gamma)
     Q = np.outer(y, y) * K
     
-    # Helper to compute full gradient: Q * alpha - 1
-    # We update gradient iteratively or recompute (recompute is safer for stability here)
-    
     start_time = time.time()
     
-    print(f" -> Starting Decomposition Loop (q={q})...")
-    
+    final_gap = 0
     iteration = 0
-    final_obj = 0
     
-    for it in range(max_outer_iter):
+    print(" -> Starting Decomposition Loop...")
+    for it in range(max_iter):
         iteration = it
         
-        # 2. Compute Gradient of the dual: g = Q * alpha - 1
+        # 1. Compute Gradient: Q*alpha - 1
         grad = np.dot(Q, alpha) - 1.0
         
-        # 3. Check KKT and Select Working Set
-        I_up, I_low, yg = get_kkt_violation_indices(alpha, grad, y, C)
+        # 2. Select Working Set
+        ws_idx, gap = get_working_set_indices(alpha, grad, y, C, q)
+        final_gap = gap
         
-        # Filter valid indices for selection
-        # We want to pick indices i from I_up with LARGEST yg
-        # We want to pick indices j from I_low with SMALLEST yg
-        # gap = max(yg[I_up]) - min(yg[I_low])
-        
-        # Sort I_up descending by yg
-        I_up_sorted = I_up[np.argsort(yg[I_up])[::-1]]
-        # Sort I_low ascending by yg
-        I_low_sorted = I_low[np.argsort(yg[I_low])]
-        
-        if len(I_up_sorted) == 0 or len(I_low_sorted) == 0:
+        if gap < tol or len(ws_idx) < 2:
+            print(f"   Converged at iter {it}. Gap: {gap:.6f}")
             break
-            
-        max_viol = yg[I_up_sorted[0]]
-        min_viol = yg[I_low_sorted[0]]
-        diff = max_viol - min_viol
-        
-        if diff < tol:
-            print(f"   Converged at iter {it}. Gap: {diff:.6f}")
-            break
-            
-        # Selection Rule: Pick q/2 from top of I_up and q/2 from top of I_low
-        # This ensures we have pairs that can exchange mass to satisfy equality constraint
-        n_select = q // 2
-        
-        ws_indices = np.concatenate([I_up_sorted[:n_select], I_low_sorted[:n_select]])
-        ws_indices = np.unique(ws_indices) # Safety check
-        
-        # If we don't have enough candidates, just take what we have
-        if len(ws_indices) < 2:
-            break
-
-        # 4. Construct Subproblem
-        # We separate indices into Working (W) and Fixed (F)
-        # alpha_W is variable, alpha_F is constant
-        
-        # Sub-Objective term: 0.5 * a_W' Q_WW a_W + (Q_WF * a_F - 1)_W * a_W
-        # The linear term for the subproblem is: (Q[W, :] * alpha) - 1 - (Q[W, W] * alpha[W])
-        # Which simplifies to: grad[W] - (Q[W, W] * alpha[W])
-        # Wait, easier: standard form 0.5 a'Q a + c'x
-        # c_sub = (Q_WF * alpha_F) - 1
-        # c_sub = (Q_row_W * alpha) - (Q_WW * alpha_W) - 1
-        # c_sub = grad[W] - (Q_WW * alpha_W)
-        
-        # Actually, let's just pass the full logic to the solver wrapper
-        # The "linear part" that comes from fixed variables is:
-        # sum_{j in Fixed} Q_ij * alpha_j - 1
-        # We can extract this from the current full gradient:
-        # linear_term_sub = grad[ws_indices] - np.dot(Q[np.ix_(ws_indices, ws_indices)], alpha[ws_indices])
-        
-        Q_sub = Q[np.ix_(ws_indices, ws_indices)]
-        y_sub = y[ws_indices]
-        current_alpha_sub = alpha[ws_indices]
-        
-        # The linear term for the QP subproblem
-        # Derived from: 0.5*a_all*Q*a_all - sum(a_all)
-        # relevant parts for a_sub: 0.5*a_sub*Q_sub*a_sub + a_sub * (Q_fixed*a_fixed - 1)
-        linear_term_sub = grad[ws_indices] - np.dot(Q_sub, current_alpha_sub)
-        
-        # 5. Solve Subproblem
-        new_alpha_sub = solve_subproblem(Q_sub, y_sub, linear_term_sub, C, current_alpha_sub)
-        
-        # 6. Update global alpha
-        alpha[ws_indices] = new_alpha_sub
         
         if it % 100 == 0:
-            obj_val = 0.5 * np.dot(alpha, np.dot(Q, alpha)) - np.sum(alpha)
-            print(f"   Iter {it}: Obj={obj_val:.4f}, KKT Gap={diff:.6f}")
+             print(f"   Iter {it}: KKT Gap = {gap:.6f}")
+            
+        # 3. Setup Subproblem
+        current_alpha_sub = alpha[ws_idx]
+        Q_sub = Q[np.ix_(ws_idx, ws_idx)]
+        y_sub = y[ws_idx]
+        linear_term = grad[ws_idx] - np.dot(Q_sub, current_alpha_sub)
+        
+        # 4. Solve
+        alpha_new_sub = solve_subproblem(Q_sub, y_sub, linear_term, C, current_alpha_sub)
+        
+        # 5. Update
+        alpha[ws_idx] = alpha_new_sub
 
     end_time = time.time()
     
-    # Calculate final stats
+    # Final Objective
     final_obj = 0.5 * np.dot(alpha, np.dot(Q, alpha)) - np.sum(alpha)
     
-    # Compute Bias b
+    # Calculate Bias b
     sv_indices = np.where((alpha > 1e-5) & (alpha < C - 1e-5))[0]
     if len(sv_indices) > 0:
-        b_list = []
-        for idx in sv_indices:
-            # b = y_k - sum(alpha_j y_j K_jk)
-            pred = np.dot(alpha * y, K[:, idx])
-            b_list.append(y[idx] - pred)
+        b_list = [y[k] - np.dot(alpha * y, K[:, k]) for k in sv_indices]
         b = np.mean(b_list)
     else:
         b = 0.0
-        
+
     stats = {
         'time': end_time - start_time,
         'iterations': iteration,
         'final_obj': final_obj,
-        'status': 'Converged' if iteration < max_outer_iter else 'Max Iter Reached',
-        'kkt_gap': diff if 'diff' in locals() else 0.0
+        'gap': final_gap,
+        'status': 'Converged' if iteration < max_iter else 'Max Iter'
     }
     
     return alpha, b, stats
