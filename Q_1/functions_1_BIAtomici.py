@@ -1,267 +1,389 @@
-# Helper functions for Question 1 - Group BIAtomici
+"""
+Question 1 - SVM Dual con Frank-Wolfe (Conditional Gradient Method)
+Gruppo: BIAtomici
 
+Questo modulo contiene:
+- extract_data(): estrae i dati dalle CSV FashionMNIST (classi 2 vs 3) e
+  crea un train/test binario con etichette +1 (label 2) e -1 (label 3).
+- Scaling delle feature.
+- Kernel RBF e (opzionalmente) polynomial.
+- Addestramento SVM duale via Frank-Wolfe (minimizzazione convessa del duale).
+- Calcolo di b, funzione decisionale, accuratezza, confusion matrix.
+- k-fold cross-validation con grid search su (C, gamma).
+
+Restrizioni: niente librerie ML auto-allenanti (sklearn, torch, ecc.).
+Solo numpy/pandas/standard lib.
+"""
+
+import os
+import time
 import numpy as np
 import pandas as pd
-import os
-from scipy.optimize import minimize
-import time
+from typing import Tuple, Dict, Any, List
 
+
+# ============================================================
+# 1) Estrazione dati (come da traccia)
+# ============================================================
 def extract_data():
     """
-    Load and prepare FashionMNIST folder containing the training and testing data.
-    Based on the provided extractor.py.
+    Load and prepare FashionMNIST folder containing the training and testing data (csv files).
+    Make sure the folder 'FashionMNIST' is inside your project directory (i.e. at the same level of your Q_i folders).
     """
-    # Adjust path to step up one level to find FashionMNIST
-    # Assuming structure: Project/Q_1/run.py -> need Project/FashionMNIST
-    train_path = os.path.join('..', 'FashionMNIST', 'fashion-mnist_train.csv')
-    test_path = os.path.join('..', 'FashionMNIST', 'fashion-mnist_test.csv')
 
-    # Safety check for path (user specific)
-    if not os.path.exists(train_path):
-        # Fallback if running from root
-        train_path = os.path.join('FashionMNIST', 'fashion-mnist_train.csv')
-        test_path = os.path.join('FashionMNIST', 'fashion-mnist_test.csv')
+    train = pd.read_csv(r"C:\Users\gluca\Desktop\OMML_PROJ2\FashionMNIST\fashion-mnist_train.csv")
+    test = pd.read_csv(r"C:\Users\gluca\Desktop\OMML_PROJ2\FashionMNIST\fashion-mnist_test.csv")
 
-    train = pd.read_csv(train_path)
-    test = pd.read_csv(test_path)
-
-    # Extract labels 2 (Pullover) and 3 (Dress)
+    # We need to extract only the items with label 2 and 3:
     indexes = [2, 3]
+
     train_set = train[train['label'].isin(indexes)]
     test_set = test[test['label'].isin(indexes)]
 
     X = train_set.values[:, 1:]
     Y = train_set.values[:, 0]
+
     X_Test = test_set.values[:, 1:]
     Y_Test = test_set.values[:, 0]
 
-    # Subset: 1000 samples per class for training
-    ind_2 = np.where(Y == 2)[0][:1000]
-    ind_3 = np.where(Y == 3)[0][:1000]
-    
-    # Subset: 200 samples per class for testing
-    ind_2_test = np.where(Y_Test == 2)[0][:200]
-    ind_3_test = np.where(Y_Test == 3)[0][:200]
+    ind_2 = np.where(Y == 2)
+    ind_2_Test = np.where(Y_Test == 2)
 
-    # Assign labels: +1 for Pullover (2), -1 for Dress (3)
-    X2 = X[ind_2]; Y2 = np.ones(len(ind_2))
-    X3 = X[ind_3]; Y3 = -np.ones(len(ind_3))
-    
-    X2t = X_Test[ind_2_test]; Y2t = np.ones(len(ind_2_test))
-    X3t = X_Test[ind_3_test]; Y3t = -np.ones(len(ind_3_test))
+    ind_3 = np.where(Y == 3)
+    ind_3_Test = np.where(Y_Test == 3)
 
-    X_train = np.concatenate((X2, X3))
-    Y_train = np.concatenate((Y2, Y3))
-    X_test = np.concatenate((X2t, X3t))
-    Y_test = np.concatenate((Y2t, Y3t))
+    """
+    Only a subset of 1000 samples per class will be used.
+    To train a SVM in case of binary classification we have to convert the labels of the two classes of interest into '+1' and '-1'.
+    """
 
-    # Shuffle
+    X2 = X[ind_2[0][:1000]]
+    Y2 = np.ones(1000)
+
+    X3 = X[ind_3[0][:1000]]
+    Y3 = -np.ones(1000)
+
+    X2test = X_Test[ind_2_Test[0][:200]]
+    Y2test = np.ones(X2test.shape[0])
+
+    X3test = X_Test[ind_3_Test[0][:200]]
+    Y3test = -np.ones(X3test.shape[0])
+
+    X_train = np.concatenate((X2, X3))  # X_train (2000x784): pixel delle immagini train (scala grezza 0–255)
+    Y_train = np.concatenate((Y2, Y3))  # Y_train (2000,): etichette {+1,-1}
+
+    X_test = np.concatenate((X2test, X3test))  # X_test (400×784)
+    Y_test = np.concatenate((Y2test, Y3test))  # Y_test (400,)
+
+    # Reshuffle training data
     np.random.seed(1)
     perm = np.random.permutation(len(Y_train))
     X_train = X_train[perm]
     Y_train = Y_train[perm]
 
-    # Scaling (Important for SVM!)
-    # Simple Min-Max scaling to [0,1] or Standardization. 
-    # Pixel values are 0-255, so dividing by 255 is standard.
-    X_train = X_train / 255.0
-    X_test = X_test / 255.0
-
     return X_train, Y_train, X_test, Y_test
 
-def rbf_kernel(X1, X2, gamma):
-    """
-    Computes RBF kernel matrix: K(x, y) = exp(-gamma * ||x - y||^2)
-    Uses vectorized Euclidean distance calculation.
-    """
-    # ||x - y||^2 = ||x||^2 + ||y||^2 - 2<x, y>
-    sq_norm1 = np.sum(X1**2, axis=1).reshape(-1, 1)
-    sq_norm2 = np.sum(X2**2, axis=1).reshape(1, -1)
-    dot_product = np.dot(X1, X2.T)
-    dist_sq = sq_norm1 + sq_norm2 - 2 * dot_product
-    return np.exp(-gamma * dist_sq)
 
-def objective_function(alpha, Q):
-    """
-    Dual Objective: 0.5 * alpha^T * Q * alpha - sum(alpha)
-    """
-    return 0.5 * np.dot(alpha, np.dot(Q, alpha)) - np.sum(alpha)
+# ============================================================
+# 2) Preprocessing & Utilità
+# ============================================================
 
-def objective_gradient(alpha, Q):
-    """
-    Gradient of Dual Objective: Q * alpha - 1
-    """
-    return np.dot(Q, alpha) - np.ones_like(alpha)
+# Normalizzare i pixel in [0,1]
+def scale_minmax_01(X: np.ndarray) -> np.ndarray:
+    """Scala le feature in [0,1] (pixel/255)."""
+    return X.astype(np.float64) / 255.0  # se X è uint8 lo converte in folat64
 
-def solve_svm_dual(X, y, C, gamma):
-    """
-    Solves the Dual SVM problem using Scipy SLSQP with progress tracking.
-    """
-    n_samples = X.shape[0]
-    
-    print(f" -> Computing Kernel Matrix for {n_samples} samples...")
-    K = rbf_kernel(X, X, gamma)
-    print(" -> Computing Q Matrix...")
-    Q = np.outer(y, y) * K
-    
-    # Constraint: sum(alpha_i * y_i) = 0
-    constraints = {'type': 'eq', 'fun': lambda alpha: np.dot(alpha, y), 'jac': lambda alpha: y}
-    bounds = [(0, C) for _ in range(n_samples)]
-    alpha0 = np.zeros(n_samples)
-    
-    # Progress callback function
-    def progress_callback(xk):
-        print(f"   [Optimization] Iteration completed. Current Objective: {objective_function(xk, Q):.4f}")
 
-    print(" -> Starting Optimization (this may take time)...")
-    start_time = time.time()
-    
-    # Reduced maxiter to 50 for testing speed, increase back to 100-200 for final result
-    result = minimize(fun=objective_function, 
-                      x0=alpha0, 
-                      args=(Q,), 
-                      method='SLSQP', 
-                      jac=objective_gradient, 
-                      bounds=bounds, 
-                      constraints=constraints,
-                      callback=progress_callback,
-                      options={'maxiter': 50, 'ftol': 1e-4, 'disp': True}) 
-                      
-    end_time = time.time()
-    print(" -> Optimization Finished.")
-    
-    alpha_opt = result.x
-    
-    # Compute Bias b
-    sv_indices = np.where((alpha_opt > 1e-5) & (alpha_opt < C - 1e-5))[0]
-    if len(sv_indices) > 0:
-        b_values = []
-        for idx in sv_indices:
-            prediction_part = np.dot(alpha_opt * y, K[:, idx])
-            b_values.append(y[idx] - prediction_part)
-        b = np.mean(b_values)
+def confusion_matrix_binary(y_true: np.ndarray, y_pred: np.ndarray) -> np.ndarray:
+    """
+    Confusion matrix 2x2 per classi {-1, +1}.
+    Le righe corrispondono alle classi vere [riga 0: -1, riga 1: +1], Colonne sono le classi predette = predetti nell'ordine [colonna 0: -1, colonna 1:  +1].
+    """
+    cm = np.zeros((2, 2), dtype=int)  # inizializzazione a 0
+    # Mappatura delle classi da {-1,+1} a {0,1} tramite astype() --> usefuk for the loop below
+    t = (y_true > 0).astype(int)  # y_true: etichette vere
+    p = (y_pred > 0).astype(int)  # y_pred: etichette predette
+    for i in range(2):
+        for j in range(2):
+            cm[i, j] = np.sum((t == i) & (p == j))
+    return cm
+
+
+def accuracy_percent(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    return 100.0 * np.mean(y_true == y_pred)
+
+
+# ============================================================
+# 3) Kernel
+# ============================================================
+def _sq_dists(X: np.ndarray, Y: np.ndarray) -> np.ndarray:
+    """Distanze quadrate euclidee tutte-le-coppie in modo vettoriale."""
+    X2 = np.sum(X * X, axis=1)[:, None]
+    Y2 = np.sum(Y * Y, axis=1)[None, :]
+    return np.maximum(X2 + Y2 - 2.0 * X @ Y.T, 0.0)
+
+
+def rbf_kernel(X: np.ndarray, Y: np.ndarray, gamma: float) -> np.ndarray:
+    """K(x,y) = exp(-gamma * ||x - y||^2)"""
+    D2 = _sq_dists(X, Y)
+    return np.exp(-gamma * D2)
+
+
+def poly_kernel(X: np.ndarray, Y: np.ndarray, gamma: float) -> np.ndarray:
+    """K(x,y) = (x^T y + 1)^gamma (qui gamma è il grado, tipicamente intero >= 1)."""
+    return (X @ Y.T + 1.0) ** gamma
+
+
+def compute_kernel(XA: np.ndarray, XB: np.ndarray, kernel: str, gamma: float) -> np.ndarray:
+    if kernel.lower() == 'rbf':
+        return rbf_kernel(XA, XB, gamma)
+    elif kernel.lower() == 'poly':
+        return poly_kernel(XA, XB, gamma)
     else:
-        b = 0.0
+        raise ValueError("Kernel non supportato: scegli 'rbf' o 'poly'.")
 
-    stats = {
-        'time': end_time - start_time,
-        'iterations': result.nit,
-        'final_obj': result.fun,
-        'status': result.message,
-        'alpha': alpha_opt,
-        'b': b
+
+# ============================================================
+# 4) SVM Dual via Frank-Wolfe
+# ============================================================
+def _dual_objective(alpha: np.ndarray, Q: np.ndarray) -> float:
+    """
+    f(alpha) = 0.5 * alpha^T Q alpha - 1^T alpha
+    (problema di minimizzazione convessa equivalente al duale SVM)
+    """
+    return 0.5 * alpha @ (Q @ alpha) - np.sum(alpha)
+
+
+def _dual_gradient(alpha: np.ndarray, Q: np.ndarray) -> np.ndarray:
+    """g = grad f = Q alpha - 1"""
+    return Q @ alpha - np.ones_like(alpha)
+
+
+def _linear_minimization_oracle_FW(g: np.ndarray, y: np.ndarray, C: float) -> np.ndarray:
+    """
+    Oracle di minimizzazione lineare per l'insieme
+    P = { alpha in [0,C]^n : y^T alpha = 0 }.
+    Un vertice di P è ottenibile selezionando una coppia (p,n) con y_p=+1, y_n=-1
+    e ponendo alpha_p = C, alpha_n = C, gli altri 0. Scegliamo gli argmin del gradiente
+    per ciascun gruppo.
+    """
+    # Indici per classi
+    P_idx = np.where(y > 0)[0]
+    N_idx = np.where(y < 0)[0]
+    # argmin del gradiente in ciascun gruppo
+    ip = P_idx[np.argmin(g[P_idx])]
+    ineg = N_idx[np.argmin(g[N_idx])]
+    s = np.zeros_like(g)
+    s[ip] = C
+    s[ineg] = C
+    return s
+
+
+def _compute_b_from_K(K: np.ndarray, y: np.ndarray, alpha: np.ndarray, C: float, tol: float = 1e-8) -> float:
+    """
+    Calcola b usando i vettori di supporto con 0 < alpha_i < C.
+    Se non ce ne sono, usa tutti gli alpha > tol come fallback.
+    """
+    ay = alpha * y
+    decision_no_b = K @ ay  # f_i senza b
+    margin = np.where((alpha > tol) & (alpha < C - tol))[0]
+    if margin.size > 0:
+        b_i = y[margin] - decision_no_b[margin]
+        return float(np.mean(b_i))
+    # fallback
+    sv = np.where(alpha > tol)[0]
+    if sv.size > 0:
+        b_i = y[sv] - decision_no_b[sv]
+        return float(np.mean(b_i))
+    # casi degeneri: nessun SV -> b=0
+    return 0.0
+
+
+def _kkt_m_M(K: np.ndarray, y: np.ndarray, alpha: np.ndarray, C: float, eps: float = 1e-8) -> Tuple[float, float, float]:
+    """
+    Calcola m(alpha), M(alpha) e la loro differenza (criterio KKT stile SMO):
+    G_i = y_i * (K @ (alpha*y))_i - 1
+    I_up  = {i | (y_i=+1 and alpha_i < C) or (y_i=-1 and alpha_i > 0)}
+    I_low = {i | (y_i=+1 and alpha_i > 0) or (y_i=-1 and alpha_i < C)}
+    m = max_{i in I_up}  (-G_i)
+    M = min_{i in I_low} (-G_i)
+    """
+    ay = alpha * y
+    f_no_b = K @ ay
+    G = y * f_no_b - 1.0
+
+    I_up = np.where(((y > 0) & (alpha < C - eps)) | ((y < 0) & (alpha > eps)))[0]
+    I_low = np.where(((y > 0) & (alpha > eps)) | ((y < 0) & (alpha < C - eps)))[0]
+
+    m = np.max(-G[I_up]) if I_up.size > 0 else np.inf
+    M = np.min(-G[I_low]) if I_low.size > 0 else -np.inf
+    gap = m - M
+    return float(m), float(M), float(gap)
+
+
+def train_svm_dual_frank_wolfe(
+    X: np.ndarray,
+    y: np.ndarray,
+    C: float,
+    kernel: str = 'rbf',
+    gamma: float = 1e-2,
+    max_iter: int = 500,
+    tol_kkt: float = 1e-3,
+    seed: int = 1,
+    verbose: bool = False
+) -> Dict[str, Any]:
+    """
+    Allena la SVM duale minimizzando f(alpha) con Frank-Wolfe.
+    Ritorna un dizionario modello con: alpha, b, support_idx, info ottimizzazione, ecc.
+    """
+    rng = np.random.default_rng(seed)
+    n = X.shape[0]
+    y = y.astype(np.float64).copy()
+
+    # Kernel train K e matrice Q = (y y^T) ∘ K
+    K = compute_kernel(X, X, kernel=kernel, gamma=gamma)
+    Q = (y[:, None] * y[None, :]) * K
+
+    # Inizializzazione: alpha=0 (ammissibile: 0<=alpha<=C e y^T alpha = 0)
+    alpha = np.zeros(n, dtype=np.float64)
+
+    history_obj = []
+    status = 'running'
+    t0 = time.time()
+    it = 0
+
+    for it in range(1, max_iter + 1):
+        g = _dual_gradient(alpha, Q)
+        s = _linear_minimization_oracle_FW(g, y, C)
+        d = s - alpha
+
+        # Line-search esatta per quadratica: gamma* = clip( -g^T d / (d^T Q d), [0,1] )
+        denom = d @ (Q @ d)
+        numer = g @ d
+        if denom > 0:
+            step = np.clip(-numer / denom, 0.0, 1.0)
+        else:
+            # direzione lineare; se numer < 0, prendi passo pieno
+            step = 1.0 if numer < 0 else 0.0
+
+        alpha = alpha + step * d
+        # (per costruzione, alpha resta in [0,C] e soddisfa y^T alpha = 0)
+
+        fval = _dual_objective(alpha, Q)
+        history_obj.append(fval)
+
+        # Criterio di arresto KKT m-M
+        m, M, gap = _kkt_m_M(K, y, alpha, C)
+        if verbose:
+            print(f"[FW] it={it:4d}  f={fval:.6e}  step={step:.3e}  m-M={gap:.3e}")
+        if gap <= tol_kkt:
+            status = 'optimal'
+            break
+
+    cpu_time = time.time() - t0
+
+    # Calcolo b
+    b = _compute_b_from_K(K, y, alpha, C)
+
+    # Support vectors (alpha > 0)
+    sv_idx = np.where(alpha > 1e-12)[0]
+
+    model = {
+        'alpha': alpha,
+        'b': b,
+        'support_idx': sv_idx,
+        'kernel': kernel,
+        'gamma': gamma,
+        'C': C,
+        'train_time_sec': cpu_time,
+        'iterations': it,
+        'final_obj': history_obj[-1] if len(history_obj) else None,
+        'status': status,
+        'kkt_m_minus_M': gap if 'gap' in locals() else None,
+        'K_train': K,  # utile per valutazioni su train veloci
+        'X_train': X,
+        'y_train': y,
     }
-    
-    return alpha_opt, b, stats
+    return model
 
-def calculate_kkt_gap(alpha, Q, y, C):
-    """
-    Calculates the KKT violation gap: m(alpha) - M(alpha)
-    Based on Keerthi/Gilbert definition for stopping criteria.
-    gradient_i = (Q * alpha)_i - 1
-    F_i = -y_i * gradient_i = y_i - (prediction_without_b)
-    """
-    # Gradient of objective f(alpha)
-    grad = np.dot(Q, alpha) - 1.0
-    
-    # Optimality conditions related quantities
-    # We want y_i * (model_output_i) >= 1
-    # Let model_output_without_b = sum(alpha_j y_j K_ij)
-    # Note: grad_i = y_i * model_output_without_b - 1
-    # So y_i * grad_i = model_output_without_b - y_i
-    
-    # KKT Conditions checking sets:
-    # I_up: Indices where alpha can increase
-    # I_low: Indices where alpha can decrease
-    
-    I_up = np.where(((alpha < C - 1e-6) & (y == 1)) | ((alpha > 1e-6) & (y == -1)))[0]
-    I_low = np.where(((alpha > 1e-6) & (y == 1)) | ((alpha < C - 1e-6) & (y == -1)))[0]
 
-    # F_i = -grad f(alpha)_i / y_i  (approx, depends on formulation)
-    # Let's stick to standard formulation:
-    # r_i = y_i * f(x_i) - 1  (residual)
-    # We use the gradient directly:
-    # y_i * grad_i
-    
-    vals = y * grad
-    
-    # b_up = min_{i in I_up} (y_i * grad_i)
-    # b_low = max_{i in I_low} (y_i * grad_i)
-    # The gap is b_low - b_up. At optimality b_low <= b_up.
-    
-    b_up = np.min(vals[I_up]) if len(I_up) > 0 else 0
-    b_low = np.max(vals[I_low]) if len(I_low) > 0 else 0
-    
-    return b_low - b_up
+# ============================================================
+# 5) Predizione
+# ============================================================
+def decision_function(model: Dict[str, Any], Xq: np.ndarray) -> np.ndarray:
+    """f(x) = sum_j alpha_j y_j K(x_j, x) + b"""
+    Xtr = model['X_train']
+    ytr = model['y_train']
+    alpha = model['alpha']
+    b = model['b']
+    Kqx = compute_kernel(Xq, Xtr, kernel=model['kernel'], gamma=model['gamma'])
+    return Kqx @ (alpha * ytr) + b
 
-def predict(X_train, y_train, alpha, b, X_new, gamma):
-    """
-    y(x) = sign( sum(alpha_i * y_i * K(x_i, x)) + b )
-    """
-    K_new = rbf_kernel(X_train, X_new, gamma) # Shape (N_train, N_new)
-    decision = np.dot(alpha * y_train, K_new) + b
-    return np.sign(decision)
 
-def compute_metrics(y_true, y_pred):
-    accuracy = np.mean(y_true == y_pred) * 100
-    # Confusion Matrix (2x2)
-    # Classes: 2 (mapped to +1), 3 (mapped to -1)
-    # +1: Pullover, -1: Dress
-    # Format: [[TP, FN], [FP, TN]] or similar. Let's do standard:
-    # Row: True, Col: Pred
-    # Labels: +1 (Pullover), -1 (Dress)
-    
-    # Map back to indices 0 and 1 for matrix
-    # +1 -> index 0, -1 -> index 1
-    y_t = np.where(y_true == 1, 0, 1)
-    y_p = np.where(y_pred == 1, 0, 1)
-    
-    K = 2
-    cm = np.zeros((K, K), dtype=int)
-    for i in range(len(y_true)):
-        cm[y_t[i], y_p[i]] += 1
-        
-    return accuracy, cm
+def predict(model: Dict[str, Any], Xq: np.ndarray) -> np.ndarray:
+    return np.sign(decision_function(model, Xq)).astype(np.float64)
 
-def grid_search(X, y, k=5):
+
+# ============================================================
+# 6) K-fold Cross-Validation & Grid Search
+# ============================================================
+def kfold_indices(n: int, k: int, seed: int = 1, shuffle: bool = True) -> List[np.ndarray]:
+    rng = np.random.default_rng(seed)
+    idx = np.arange(n)
+    if shuffle:
+        rng.shuffle(idx)
+    folds = np.array_split(idx, k)
+    return folds
+
+
+def grid_search_cv(
+    X: np.ndarray,
+    y: np.ndarray,
+    kernel: str,
+    grid_C: List[float],
+    grid_gamma: List[float],
+    k_fold: int = 5,
+    max_iter: int = 300,
+    tol_kkt: float = 1e-3,
+    seed: int = 1,
+) -> Dict[str, Any]:
     """
-    Simple Grid Search for C and Gamma using k-fold CV.
+    Esegue k-fold CV su griglia (C, gamma) per il kernel scelto.
+    Restituisce best params e tabella risultati.
     """
-    C_values = [0.1, 1, 10]
-    gamma_values = [0.01, 0.1, 1]
-    
-    best_acc = 0
-    best_params = (1, 0.1) # Default
-    
-    # Split indices for CV
-    indices = np.arange(len(y))
-    np.random.shuffle(indices)
-    fold_sizes = len(y) // k
-    
-    print("Starting Grid Search...")
-    for C in C_values:
-        for g in gamma_values:
-            accuracies = []
-            for i in range(k):
-                val_idx = indices[i*fold_sizes : (i+1)*fold_sizes]
-                train_idx = np.concatenate([indices[:i*fold_sizes], indices[(i+1)*fold_sizes:]])
-                
-                X_cv_train, y_cv_train = X[train_idx], y[train_idx]
-                X_cv_val, y_cv_val = X[val_idx], y[val_idx]
-                
-                # Train (Simplified/Faster for CV - maybe fewer iters)
-                # Note: Solving full SVM inside CV loop can be slow.
-                # In real scenario, use small subset or fewer iters.
-                alpha, b, _ = solve_svm_dual(X_cv_train, y_cv_train, C, g)
-                
-                y_val_pred = predict(X_cv_train, y_cv_train, alpha, b, X_cv_val, g)
-                acc, _ = compute_metrics(y_cv_val, y_val_pred)
-                accuracies.append(acc)
-            
-            avg_acc = np.mean(accuracies)
-            # print(f"Checked C={C}, Gamma={g}, Avg Acc={avg_acc:.2f}%")
-            if avg_acc > best_acc:
-                best_acc = avg_acc
-                best_params = (C, g)
-                
-    return best_params
+    n = X.shape[0]
+    folds = kfold_indices(n, k_fold, seed=seed, shuffle=True)
+
+    results = []
+    best_score = -np.inf
+    best_params = None
+
+    # Pre-compute niente (si ricalcola per ogni training fold per semplicità e robustezza)
+    for C in grid_C:
+        for gamma in grid_gamma:
+            acc_list = []
+            for k in range(k_fold):
+                val_idx = folds[k]
+                tr_idx = np.hstack([folds[j] for j in range(k_fold) if j != k])
+                Xtr, ytr = X[tr_idx], y[tr_idx]
+                Xval, yval = X[val_idx], y[val_idx]
+
+                model = train_svm_dual_frank_wolfe(
+                    Xtr, ytr, C=C, kernel=kernel, gamma=gamma,
+                    max_iter=max_iter, tol_kkt=tol_kkt, seed=seed, verbose=False
+                )
+                yhat_val = predict(model, Xval)
+                acc = accuracy_percent(yval, yhat_val)
+                acc_list.append(acc)
+
+            mean_acc = float(np.mean(acc_list))
+            results.append({'C': C, 'gamma': gamma, 'val_acc': mean_acc})
+            if mean_acc > best_score:
+                best_score = mean_acc
+                best_params = {'C': C, 'gamma': gamma}
+
+    return {
+        'best_params': best_params,
+        'best_score': best_score,
+        'results': results
+    }

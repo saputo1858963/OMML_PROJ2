@@ -1,61 +1,78 @@
-# Main script for Question 1 - Group BIAtomici
+
+# -*- coding: utf-8 -*-
+"""
+RUN Question 1 - Gruppo: BIAtomici
+
+Questo è l'UNICO file che verrà eseguito in fase di verifica.
+DEVE stampare SOLO:
+- Setting values of the hyperparameters
+- Classification rate on the training set (% instances correctly classified)
+- Classification rate on the test set (% instances correctly classified)
+- The confusion matrix
+- Time necessary for the optimization
+- Number of optimization iterations
+- Difference between m(alpha) and M(alpha)
+- The final value of the Dual SVM objective function f(alpha*)
+- Solver status
+
+Rispettare rigorosamente il formato (nessun logging di progresso).
+"""
 
 import numpy as np
-import functions_1_BIAtomici as f
-import time
+from functions_1_BIAtomici import (
+    extract_data, scale_minmax_01, grid_search_cv, train_svm_dual_frank_wolfe,
+    predict, accuracy_percent, confusion_matrix_binary
+)
 
 def main():
-    print("##############################")
-    print("Processing Question 1")
-    print("##############################")
+    # 1) Carica dati
+    Xtr, ytr, Xte, yte = extract_data()
 
-    # 1. Load Data
-    X_train, Y_train, X_test, Y_test = f.extract_data()
+    # 2) Scaling (richiesto dalla traccia)
+    Xtr = scale_minmax_01(Xtr)
+    Xte = scale_minmax_01(Xte)
 
-    # 2. Grid Search (Comment out if you want to use fixed values to save time)
-    # best_C, best_gamma = f.grid_search(X_train, Y_train, k=5)
-    
-    # Hardcoded for demonstration speed (replace with grid_search call above if needed)
-    # Assuming Grid Search found C=10, Gamma=0.01 (Example values)
-    best_C = 10
-    best_gamma = 0.01 
-    
-    # 3. Train Final Model
-    print("Training SVM with Best Hyperparameters...")
-    alpha_opt, b_opt, stats = f.solve_svm_dual(X_train, Y_train, best_C, best_gamma)
-    
-    # 4. Predictions
-    y_train_pred = f.predict(X_train, Y_train, alpha_opt, b_opt, X_train, best_gamma)
-    y_test_pred = f.predict(X_train, Y_train, alpha_opt, b_opt, X_test, best_gamma)
-    
-    # 5. Metrics
-    train_acc, cm_train = f.compute_metrics(Y_train, y_train_pred)
-    test_acc, cm_test = f.compute_metrics(Y_test, y_test_pred)
-    
-    # Compute KKT Violation (Difference m(a) - M(a))
-    # We need Q matrix one last time for this check
-    K = f.rbf_kernel(X_train, X_train, best_gamma)
-    Q = np.outer(Y_train, Y_train) * K
-    kkt_gap = f.calculate_kkt_gap(alpha_opt, Q, Y_train, best_C)
+    # 3) Scelta kernel e griglia iperparametri
+    kernel = 'rbf'            # puoi cambiare in 'poly' se desideri
+    grid_C = [0.1, 1.0, 10.0, 100.0]
+    # gamma per RBF; se usi 'poly' intendi gamma come grado del polinomio
+    grid_gamma = [1e-3, 1e-2, 1e-1, 1.0]
 
-    # 6. Print Outputs (Strictly following Figure 1/Instructions)
-    print(f"The used kernel is the: RBF")
-    print(f"C                                     {best_C}")
-    print(f"Gamma                                 {best_gamma}")
-    print(f"Accuracy on training set              {train_acc:.4f} %")
-    print(f"Accuracy on test set                  {test_acc:.4f} %")
-    print(f"Run Time (seconds)                    {stats['time']:.4f}")
-    print(f"Iterations                            {stats['iterations']}")
-    print(f"KKT violations (m(a) - M(a))          {kkt_gap:.6f}")
-    print(f"Starting value                        0.0") # We started from zero
-    print(f"Optimal value                         {stats['final_obj']:.6f}")
-    print(f"Solver status                         {stats['status']}")
-    
-    print("\nConfusion Matrix (Test Set):")
-    # Pretty print confusion matrix
-    print(f"                 Pred Pullover   Pred Dress")
-    print(f"True Pullover    {cm_test[0,0]}              {cm_test[0,1]}")
-    print(f"True Dress       {cm_test[1,0]}              {cm_test[1,1]}")
+    # 4) k-fold CV per trovare (C, gamma)
+    cv = grid_search_cv(
+        Xtr, ytr, kernel=kernel,
+        grid_C=grid_C, grid_gamma=grid_gamma,
+        k_fold=5, max_iter=300, tol_kkt=1e-3, seed=1
+    )
+    C_best = cv['best_params']['C']
+    gamma_best = cv['best_params']['gamma']
+
+    # 5) Allena modello finale su TUTTO il training set con (C*, gamma*)
+    model = train_svm_dual_frank_wolfe(
+        Xtr, ytr, C=C_best, kernel=kernel, gamma=gamma_best,
+        max_iter=800, tol_kkt=5e-4, seed=1, verbose=False
+    )
+
+    # 6) Predizioni e metriche
+    yhat_tr = predict(model, Xtr)
+    yhat_te = predict(model, Xte)
+
+    acc_tr = accuracy_percent(ytr, yhat_tr)
+    acc_te = accuracy_percent(yte, yhat_te)
+    cm = confusion_matrix_binary(yte, yhat_te)
+
+    # 7) STAMPE (SOLO quanto richiesto)
+    #    Nota: classi: +1 = pullover (label 2), -1 = dress (label 3)
+    print(f"Kernel: {model['kernel']}, C: {model['C']}, gamma: {model['gamma']}")
+    print(f"Training accuracy (%): {acc_tr:.2f}")
+    print(f"Test accuracy (%): {acc_te:.2f}")
+    print("Confusion matrix (rows=true [-1,+1], cols=pred [-1,+1]):")
+    print(cm.tolist())  # list per una stampa pulita senza array prefix
+    print(f"Optimization time (s): {model['train_time_sec']:.6f}")
+    print(f"Number of iterations: {model['iterations']}")
+    print(f"m(alpha) - M(alpha): {model['kkt_m_minus_M']:.6e}")
+    print(f"Dual objective f(alpha*): {model['final_obj']:.10e}")
+    print(f"Solver status: {model['status']}")
 
 if __name__ == "__main__":
     main()
