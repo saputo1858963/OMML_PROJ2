@@ -98,22 +98,6 @@ def scale_minmax_01(X: np.ndarray) -> np.ndarray:
     """Scala le feature in [0,1] (pixel/255)."""
     return X.astype(np.float64) / 255.0  # se X è uint8 lo converte in folat64
 
-# La confusion matrix indica in ogni cella della diagonale principale quante predizioni sono state azzeccate
-# mentre nella diagonale secondarie quante previsioni sono state errate
-def confusion_matrix_binary(y_true: np.ndarray, y_pred: np.ndarray) -> np.ndarray:
-    """
-    Confusion matrix 2x2 per classi {-1, +1}.
-    Le righe corrispondono alle classi vere [riga 0: -1, riga 1: +1], Colonne sono le classi predette = predetti nell'ordine [colonna 0: -1, colonna 1:  +1].
-    """
-    cm = np.zeros((2, 2), dtype=int)  # inizializzazione a 0
-    # Mappatura delle classi da {-1,+1} a {0,1} tramite astype() --> usefuk for the loop below
-    t = (y_true > 0).astype(int)  # y_true: etichette vere
-    p = (y_pred > 0).astype(int)  # y_pred: etichette predette
-    for i in range(2):
-        for j in range(2):
-            cm[i, j] = np.sum((t == i) & (p == j))
-    return cm
-
 # Accuratezza in percentuale
 def accuracy_percent(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return 100.0 * np.mean(y_true == y_pred)
@@ -343,6 +327,23 @@ def decision_function(model: Dict[str, Any], Xq: np.ndarray) -> np.ndarray:
 # Returns a vector of predictions {-1,+1}
 def predict(model: Dict[str, Any], Xq: np.ndarray) -> np.ndarray:
     return np.sign(decision_function(model, Xq)).astype(np.float64)
+
+# La confusion matrix indica in ogni cella della diagonale principale quante predizioni sono state azzeccate
+# mentre nella diagonale secondarie quante previsioni sono state errate
+def confusion_matrix_binary(y_true: np.ndarray, y_pred: np.ndarray) -> np.ndarray:
+    """
+    Confusion matrix 2x2 per classi {-1, +1}.
+    Le righe corrispondono alle classi vere [riga 0: -1, riga 1: +1], Colonne sono le classi predette = predetti nell'ordine [colonna 0: -1, colonna 1:  +1].
+    """
+    cm = np.zeros((2, 2), dtype=int)  # inizializzazione a 0
+    # Mappatura delle classi da {-1,+1} a {0,1} tramite astype() --> usefuk for the loop below
+    t = (y_true > 0).astype(int)  # y_true: etichette vere
+    p = (y_pred > 0).astype(int)  # y_pred: etichette predette
+    for i in range(2):
+        for j in range(2):
+            cm[i, j] = np.sum((t == i) & (p == j))
+    return cm
+
 
 # ============================================================
 # 6) K-fold Cross-Validation & Grid Search
