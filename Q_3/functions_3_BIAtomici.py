@@ -1,14 +1,9 @@
-# Helper functions for Question 3 - Group BIAtomici
-
 import numpy as np
 import pandas as pd
 import os
 import time
 
 def extract_data():
-    """
-    Load and prepare FashionMNIST folder using robust absolute paths.
-    """
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(current_dir)
     train_path = os.path.join(project_root, 'FashionMNIST', 'fashion-mnist_train.csv')
@@ -77,24 +72,20 @@ def compute_metrics(y_true, y_pred):
         cm[y_t[i], y_p[i]] += 1
     return accuracy, cm
 
+# Solve dual SVM with MVP
 def solve_svm_mvp(X, y, C, gamma, max_iter=100000, tol=1e-3):
-    """
-    Solves Dual SVM using MVP (Most Violating Pair) Decomposition (q=2).
-    """
     n_samples = X.shape[0]
     
-    print(" -> Precomputing Kernel Matrix...")
     K = rbf_kernel(X, X, gamma)
     Q = np.outer(y, y) * K
     
     alpha = np.zeros(n_samples)
     
-    # Gradient of dual objective (Minimization): grad = Q*alpha - 1
+    # Gradient of dual objective (minimization): grad = Q*alpha - 1
     # Initially alpha=0, so grad = -1
     grad = -np.ones(n_samples)
     
     start_time = time.time()
-    print(" -> Starting MVP Optimization Loop...")
     
     iters = 0
     final_diff = 0
@@ -102,24 +93,18 @@ def solve_svm_mvp(X, y, C, gamma, max_iter=100000, tol=1e-3):
     for it in range(max_iter):
         iters = it
         
-        # --- Step 1: Select MVP (Most Violating Pair) ---
-        # yg = y_i * grad_i
-        yg = y * grad
+        # Select MVP (Most Violating Pair): the q = 2 variables that will be updated
+        yg = y * grad  
         
-        # I_up: Indices where alpha can increase (y=1 & a<C) OR (y=-1 & a>0)
-        mask_up = ((y == 1) & (alpha < C - 1e-6)) | ((y == -1) & (alpha > 1e-6))
-        # I_low: Indices where alpha can decrease (y=1 & a>0) OR (y=-1 & a<C)
-        mask_low = ((y == 1) & (alpha > 1e-6)) | ((y == -1) & (alpha < C - 1e-6))
+        R = ((y == 1) & (alpha < C - 1e-6)) | ((y == -1) & (alpha > 1e-6))
+        S = ((y == 1) & (alpha > 1e-6)) | ((y == -1) & (alpha < C - 1e-6))
         
-        idx_up = np.where(mask_up)[0]
-        idx_low = np.where(mask_low)[0]
+        idx_up = np.where(R)[0]
+        idx_low = np.where(S)[0]
         
         if len(idx_up) == 0 or len(idx_low) == 0:
             break
         
-        # Keerthi/Gilbert Selection:
-        # i (from I_up) should have MINIMAL yg (b_up)
-        # j (from I_low) should have MAXIMAL yg (b_low)
         i = idx_up[np.argmin(yg[idx_up])]
         j = idx_low[np.argmax(yg[idx_low])]
         
@@ -127,17 +112,16 @@ def solve_svm_mvp(X, y, C, gamma, max_iter=100000, tol=1e-3):
         diff = yg[j] - yg[i]
         final_diff = diff
         
-        if diff < tol:
-            print(f"   Converged at iter {it}. Gap: {diff:.6f}")
+        if diff < tol:  # we are sufficiently optimum
             break
             
-        # --- Step 2: Analytic Solution ---
+        # Analytic solution
         a_i_old = alpha[i]
         a_j_old = alpha[j]
         y_i = y[i]
         y_j = y[j]
         
-        # Compute bounds L and H
+        # Compute the admissible interval [L,H] of alpha_j_new
         if y_i != y_j:
             L = max(0, a_j_old - a_i_old)
             H = min(C, C + a_j_old - a_i_old)
@@ -154,9 +138,7 @@ def solve_svm_mvp(X, y, C, gamma, max_iter=100000, tol=1e-3):
         if eta >= -1e-12:
             continue
         
-        # Update formula: a_j_new = a_j_old + y_j * (diff / eta)
-        # Note: diff > 0, eta < 0. Term is negative.
-        # This reduces alpha_j (if y_j=1) which is correct for "I_low"
+        # Update a_j
         a_j_new = a_j_old + (y_j * diff) / eta
         
         # Clip
@@ -171,7 +153,7 @@ def solve_svm_mvp(X, y, C, gamma, max_iter=100000, tol=1e-3):
         # Update alpha_i
         a_i_new = a_i_old + y_i * y_j * (a_j_old - a_j_new)
         
-        # --- Step 3: Update Gradient ---
+        # Update gradient 
         delta_i = a_i_new - a_i_old
         delta_j = a_j_new - a_j_old
         grad += delta_i * Q[:, i] + delta_j * Q[:, j]
@@ -179,9 +161,6 @@ def solve_svm_mvp(X, y, C, gamma, max_iter=100000, tol=1e-3):
         alpha[i] = a_i_new
         alpha[j] = a_j_new
         
-        if it % 5000 == 0 and it > 0:
-             print(f"   Iter {it}: Gap {diff:.5f}")
-
     end_time = time.time()
     
     final_obj = 0.5 * np.dot(alpha, np.dot(Q, alpha)) - np.sum(alpha)

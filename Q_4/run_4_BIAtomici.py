@@ -1,80 +1,67 @@
-from functions_4_BIAtomici import extract_data_Q4, MulticlassSVM_OAA, get_confusion_matrix
 import numpy as np
-import time
+import functions_4_BIAtomici as fn 
 
-def run_q4():
-    # 1. Load Data
-    X_train, Y_train, X_test, Y_test = extract_data_Q4()
+def main():
+    # Data loading
+    X_train, Y_train, X_test, Y_test = fn.extract_data_Q4()
     
-    # 2. Hyperparameter Selection (Grid Search with K-Fold)
-    # [cite_start]Range candidates [cite: 54]
-    C_values = [1, 10]
-    gamma_values = [0.01, 0.1]
+    # --- HYPERPARAMETER SELECTION (Grid Search) ---
+    # We select only two classes to tune the parameters (e.g. 2 vs 3)
+    # in order to use BinarySVM for the GridSearch
+    mask_cv = (Y_train == 2) | (Y_train == 3)
+    X_cv = X_train[mask_cv]
+    y_cv = Y_train[mask_cv]
+    # Conversion of labels in +1/-1 for the BinarySVM
+    y_cv_bin = np.where(y_cv == 2, 1.0, -1.0)
     
-    best_acc = 0
-    best_C = 10
-    best_gamma = 0.01
+    grid_C = [0.1, 1.0, 10.0, 100.0]
+    grid_gamma = [1e-3, 1e-2, 1e-1, 1.0]
     
-    # Simple validation set approach to save time for demonstration
-    # (Using 20% of train as val)
-    n_val = int(0.2 * len(Y_train))
-    X_val = X_train[:n_val]
-    Y_val = Y_train[:n_val]
-    X_tr_part = X_train[n_val:]
-    Y_tr_part = Y_train[n_val:]
+    # Grid Search
+    gs_results = fn.grid_search_cv(
+        X_cv, y_cv_bin, 
+        grid_C=grid_C, 
+        grid_gamma=grid_gamma, 
+        k_fold=5,
+        max_iter=300 
+    )
     
-    # print("Starting Grid Search...") # Commented out to match output strictness
+    best_params = gs_results['best_params']
+    C_val = best_params['C']
+    gamma_val = best_params['gamma']
     
-    for C in C_values:
-        for g in gamma_values:
-            # Train smaller model for tuning
-            svm_tune = MulticlassSVM_OAA(C=C, gamma=g, max_iter=200, tol=0.1)
-            svm_tune.fit(X_tr_part, Y_tr_part)
-            pred_val = svm_tune.predict(X_val)
-            acc = np.mean(pred_val == Y_val)
-            
-            if acc > best_acc:
-                best_acc = acc
-                best_C = C
-                best_gamma = g
-                
-    # 3. Train Final Model with Best Params
-    start_time = time.time()
-    final_model = MulticlassSVM_OAA(C=best_C, gamma=best_gamma, tol=1e-3, max_iter=1000)
-    final_model.fit(X_train, Y_train)
-    training_time = time.time() - start_time
+    # Initialization and training (Multiclass OAO)
+    model = fn.MulticlassSVM_OAO(C=C_val, gamma=gamma_val)
     
-    # 4. Evaluation
-    train_pred = final_model.predict(X_train)
-    test_pred = final_model.predict(X_test)
+    # Training
+    model.fit(X_train, Y_train)
     
-    train_acc = np.mean(train_pred == Y_train) * 100
-    test_acc = np.mean(test_pred == Y_test) * 100
+    # Prediction and metrics
+    Y_pred_train = model.predict(X_train)
+    Y_pred_test = model.predict(X_test)
     
-    # Confusion Matrix
-    classes = [2, 3, 6]
-    cm = get_confusion_matrix(Y_test, test_pred, classes)
+    acc_train = np.mean(Y_pred_train == Y_train)
+    acc_test = np.mean(Y_pred_test == Y_test)
     
-    # 5. Output Printing
-    # Must match Figure 1 and Q4 specific instructions
+    # Confusion matrix
+    unique_labels = np.unique(Y_train)
+    cm = fn.compute_confusion_matrix(Y_test, Y_pred_test, unique_labels)
     
-    print("The used kernel is the: RBF")
-    print(f"C\t\t\t\t{best_C}")
-    print(f"Gamma\t\t\t\t{best_gamma}")
-    print(f"Accuracy on training set\t{train_acc:.2f}%")
-    print(f"Accuracy on test set\t\t{test_acc:.2f}%")
-    print(f"Run Time (seconds)\t\t{training_time:.4f}")
-    print(f"Iterations\t\t\t{final_model.total_iter} (Sum of all binary SVMs)")
-    print(f"KKT violations\t\t\t{final_model.avg_kkt:.6f} (Avg)")
-    # Since Q4 OAA involves multiple objectives, we report the sum or clarify
-    print(f"Starting value\t\t\t0.0") 
-    print(f"Optimal value\t\t\t{final_model.total_obj:.4f} (Sum of Dual Objs)")
+    print("\nThe used kernel is the: RBF")
+    print(f"{'C':<30} {C_val}")
+    print(f"{'Gamma':<30} {gamma_val}")
+    print(f"{'Accuracy on training set':<30} {acc_train:.4f} ({acc_train*100:.2f}%)")
+    print(f"{'Accuracy on test set':<30} {acc_test:.4f} ({acc_test*100:.2f}%)")
+    print(f"{'Run Time (seconds)':<30} {model.stats['time']:.4f}")
+    print(f"{'Iterations (Cumulative)':<30} {model.stats['iterations']}")
+    print(f"{'Gap m(alpha) - M(alpha)':<30} {model.stats['kkt_viol']:.6f}")
+    print(f"{'Optimal value (Sum Dual Obj)':<30} {model.stats['dual_obj']:.4f}")
+    print(f"Solver status: {model.stats.get('status', 'optimal')}")
+    print(f"{'Multiclass Strategy':<30} One-Against-One (OAO)")
     
-    # Q4 Specific: Multiclass Strategy
-    print("Strategy: OAA") # [cite: 97]
-    
-    print("\nValues")
-    print(cm)
-    
+    print("-" * 30)
+    fn.print_confusion_matrix_formatted(cm, unique_labels)
+    print("-" * 30)
+
 if __name__ == "__main__":
-    run_q4()
+    main()

@@ -1,5 +1,3 @@
-# Helper functions for Question 2 - Group BIAtomici
-
 import numpy as np
 import pandas as pd
 import os
@@ -96,52 +94,58 @@ def compute_metrics(y_true, y_pred):
         
     return accuracy, cm
 
+# Selection of the working set (dimensio q): it contains the most violating indices of the KKT
 def get_working_set_indices(alpha, grad, y, C, q):
     """
-    Selects q indices based on KKT violations (Keerthi/Gilbert).
-    CORRECTED LOGIC: Picks q/2 indices from I_up with SMALLEST y*grad
-                     and q/2 indices from I_low with LARGEST y*grad.
+    Selects q indices based on KKT violations.
+    LOGIC: Picks q/2 indices from R with SMALLEST y*grad
+           and q/2 indices from S with LARGEST y*grad.
     """
-    # yg = y_i * grad_i
+    # yg = y_i * grad_i where grad = Q * alpha - 1
     yg = y * grad
     
     # I_up: Indices where alpha can increase (y=+1 & a<C) OR (y=-1 & a>0)
-    I_up = np.where(((y == 1) & (alpha < C - 1e-6)) | 
+    R = np.where(((y == 1) & (alpha < C - 1e-6)) | 
                     ((y == -1) & (alpha > 1e-6)))[0]
     
     # I_low: Indices where alpha can decrease (y=+1 & a>0) OR (y=-1 & a<C)
-    I_low = np.where(((y == 1) & (alpha > 1e-6)) | 
+    S = np.where(((y == 1) & (alpha > 1e-6)) | 
                      ((y == -1) & (alpha < C - 1e-6)))[0]
 
-    if len(I_up) == 0 or len(I_low) == 0:
+    if len(R) == 0 or len(S) == 0:
         return np.array([]), 0.0
 
     # --- FIX: SWAPPED SORTING ORDER ---
     # We want min(yg) from I_up
-    I_up_sorted = I_up[np.argsort(yg[I_up])] # Ascending (Smallest first)
+    R_sorted = R[np.argsort(yg[R])] # Ascending (Smallest first)
     
     # We want max(yg) from I_low
-    I_low_sorted = I_low[np.argsort(yg[I_low])[::-1]] # Descending (Largest first)
+    S_sorted = S[np.argsort(yg[S])[::-1]] # Descending (Largest first)
 
     # Calculate current Gap: max(I_low) - min(I_up)
     # Ideally should be positive if violation exists
-    max_viol = yg[I_low_sorted[0]]
-    min_viol = yg[I_up_sorted[0]]
-    gap = max_viol - min_viol
+    m = yg[S_sorted[0]]
+    M = yg[R_sorted[0]]
+    gap = m - M
 
-    # Select q/2 from each
-    n_select = q // 2
-    ws_indices = np.concatenate([I_up_sorted[:n_select], I_low_sorted[:n_select]])
+    # select q/2 from each
+    n_select = q // 2  # integer division
+
+    # take q/2 indices from each set
+    ws_indices = np.concatenate([R_sorted[:n_select], S_sorted[:n_select]])
     
     return np.unique(ws_indices), gap
 
+# Resolution of the quadratic subproblem
 def solve_subproblem(Q_sub, y_sub, linear_term, C, alpha_init):
     """
     Solves the small QP for the working set using SLSQP.
     """
+    # objective function
     def sub_obj(a):
         return 0.5 * np.dot(a, np.dot(Q_sub, a)) + np.dot(linear_term, a)
 
+    # jacobian
     def sub_jac(a):
         return np.dot(Q_sub, a) + linear_term
 
@@ -151,30 +155,30 @@ def solve_subproblem(Q_sub, y_sub, linear_term, C, alpha_init):
                    'fun': lambda a: np.dot(a, y_sub) - current_eq_val, 
                    'jac': lambda a: y_sub}
     
-    bounds = [(0, C) for _ in range(len(alpha_init))]
+    bounds = [(0, C) for _ in range(len(alpha_init))]  # 0 <= alpha <= C 
     
     res = minimize(sub_obj, alpha_init, jac=sub_jac, method='SLSQP', 
                    bounds=bounds, constraints=constraints, 
                    options={'ftol': 1e-8, 'disp': False})
-    return res.x
+    return res.x, res.nfev
 
-def solve_decomposition(X, y, C, gamma, q=4, max_iter=2000, tol=1e-3):
+# Decomposition framework
+def solve_decomposition(X, y, C, gamma, q, max_iter=2000, tol=1e-3):
     """
     Main Decomposition Solver.
     """
     n_samples = X.shape[0]
     alpha = np.zeros(n_samples)
     
-    print(" -> Precomputing Kernel Matrix (this might take a moment)...")
     K = rbf_kernel(X, X, gamma)
     Q = np.outer(y, y) * K
     
     start_time = time.time()
+    func_eval = []
     
     final_gap = 0
     iteration = 0
     
-    print(" -> Starting Decomposition Loop...")
     for it in range(max_iter):
         iteration = it
         
@@ -186,21 +190,19 @@ def solve_decomposition(X, y, C, gamma, q=4, max_iter=2000, tol=1e-3):
         final_gap = gap
         
         if gap < tol or len(ws_idx) < 2:
-            print(f"   Converged at iter {it}. Gap: {gap:.6f}")
-            break
+           break
         
-        if it % 100 == 0:
-             print(f"   Iter {it}: KKT Gap = {gap:.6f}")
-            
         # 3. Setup Subproblem
         current_alpha_sub = alpha[ws_idx]
         Q_sub = Q[np.ix_(ws_idx, ws_idx)]
         y_sub = y[ws_idx]
-        linear_term = grad[ws_idx] - np.dot(Q_sub, current_alpha_sub)
+        linear_term = grad[ws_idx] - np.dot(Q_sub, current_alpha_sub) 
         
         # 4. Solve
-        alpha_new_sub = solve_subproblem(Q_sub, y_sub, linear_term, C, current_alpha_sub)
+        alpha_new_sub, fun_count = solve_subproblem(Q_sub, y_sub, linear_term, C, current_alpha_sub)
         
+        func_eval.append(fun_count)
+
         # 5. Update
         alpha[ws_idx] = alpha_new_sub
 
@@ -222,6 +224,7 @@ def solve_decomposition(X, y, C, gamma, q=4, max_iter=2000, tol=1e-3):
         'iterations': iteration,
         'final_obj': final_obj,
         'gap': final_gap,
+        'func_eval': sum(func_eval),
         'status': 'Converged' if iteration < max_iter else 'Max Iter'
     }
     

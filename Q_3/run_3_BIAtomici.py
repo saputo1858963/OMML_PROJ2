@@ -1,24 +1,17 @@
-# Main script for Question 3 - Group BIAtomici
-
 import numpy as np
 import functions_3_BIAtomici as f
 
 def main():
-    print("##############################")
-    print("Processing Question 3")
-    print("##############################")
-
     try:
         X_train, Y_train, X_test, Y_test = f.extract_data()
     except FileNotFoundError as e:
         print(e)
         return
 
-    # HYPERPARAMETERS (Use values from Q1)
-    best_C = 10     # <--- UPDATE THIS
-    best_gamma = 0.01  # <--- UPDATE THIS
+    # HYPERPARAMETERS (values from Q1)
+    best_C = 100     
+    best_gamma = 0.01  
     
-    print(f"Training SVM using MVP Method (q=2)...")
     alpha, b, stats = f.solve_svm_mvp(X_train, Y_train, best_C, best_gamma)
     
     # Predictions
@@ -29,19 +22,17 @@ def main():
     train_acc, _ = f.compute_metrics(Y_train, y_train_pred)
     test_acc, cm_test = f.compute_metrics(Y_test, y_test_pred)
 
-    # Output (Q3 Requirements)
-    print(f"The used kernel is the: RBF")
-    print(f"C                                     {best_C}")
-    print(f"Gamma                                 {best_gamma}")
-    print(f"Accuracy on training set              {train_acc:.4f} %")
-    print(f"Accuracy on test set                  {test_acc:.4f} %")
-    print(f"Run Time (seconds)                    {stats['time']:.4f}")
-    print(f"Iterations                            {stats['iterations']}")
-    print(f"KKT violations (m(a) - M(a))          {stats['gap']:.6f}")
-    print(f"Starting value                        0.0")
-    print(f"Optimal value                         {stats['final_obj']:.6f}")
-    print(f"Total computed column                 {stats['cols_computed']}") 
-    print(f"Solver status                         {stats['status']}")
+    print(f"C: {best_C}")
+    print(f"Gamma: {best_gamma}")
+    print(f"Value of q: 2")
+    print(f"Accuracy on training set: {train_acc:.4f} %")
+    print(f"Accuracy on test set: {test_acc:.4f} %")
+    print(f"Run Time (seconds): {stats['time']:.4f}")
+    print(f"Iterations: {stats['iterations']}")
+    print(f"KKT violations (m(a) - M(a)): {stats['gap']:.6f}")
+    print(f"Optimal dual function value: {stats['final_obj']:.6f}")
+    print(f"Total computed column of Q: {stats['cols_computed']}") 
+    print(f"Solver status: {stats['status']}")
     
     print("\nConfusion Matrix (Test Set):")
     print(f"                 Pred Pullover   Pred Dress")
